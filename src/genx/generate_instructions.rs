@@ -240,11 +240,22 @@ fn set_last_used_move_as_move(
 /// last move, which makes Encore fail (`failencore`), lifts any repeat restriction (Gigaton Hammer, Blood
 /// Moon) and ends the first-turn window (Fake Out); `LastUsedMove::None` has exactly those effects here.
 /// A flinched Pokemon does not move, so it is handled as in `set_last_used_move_as_move`.
+///
+/// Under Encore the record is left alone: the engine keeps the encored move as the last-used slot (Showdown
+/// keeps it in Encore's own state), and an Encored Pokemon can Struggle while its encored move still has
+/// PP (e.g. Taunt on an encored status move). Overwriting it would leave Encore active without its move -
+/// the next turn offered every move and then panicked in the Encore override.
 fn set_last_used_move_as_struggle(
     side: &mut Side,
     side_ref: SideReference,
     incoming_instructions: &mut StateInstructions,
 ) {
+    if side
+        .volatile_statuses
+        .contains(&PokemonVolatileStatus::ENCORE)
+    {
+        return;
+    }
     if side
         .volatile_statuses
         .contains(&PokemonVolatileStatus::FLINCH)
@@ -1633,12 +1644,11 @@ fn move_has_no_effect(state: &State, choice: &Choice, attacking_side_ref: &SideR
     {
         return true;
     } else if choice.move_id == Choices::ENCORE {
-        return match state
-            .get_side_immutable(&attacking_side_ref.get_other_side())
-            .last_used_move
-        {
+        let target_side = state.get_side_immutable(&attacking_side_ref.get_other_side());
+        return match target_side.last_used_move {
             LastUsedMove::None => true,
-            LastUsedMove::Move(_) => false,
+            // Showdown (Encore's onStart): fails if the target's last move has no PP left
+            LastUsedMove::Move(index) => target_side.get_active_immutable().moves[&index].pp <= 0,
             LastUsedMove::Switch(_) => true,
         };
     } else if state.terrain_is_active(&Terrain::PSYCHICTERRAIN)
@@ -3416,6 +3426,40 @@ fn add_end_of_turn_instructions(
         let side = state.get_side(side_ref);
         if side.get_active().hp == 0 {
             continue;
+        }
+
+        // Encore ends once the encored move has no PP left (Showdown: Encore's onResidual), which frees the
+        // Pokemon's other moves for the next turn
+        if side
+            .volatile_statuses
+            .contains(&PokemonVolatileStatus::ENCORE)
+        {
+            if let LastUsedMove::Move(index) = side.last_used_move {
+                if side.get_active_immutable().moves[&index].pp <= 0 {
+                    incoming_instructions
+                        .instruction_list
+                        .push(Instruction::RemoveVolatileStatus(
+                            RemoveVolatileStatusInstruction {
+                                side_ref: *side_ref,
+                                volatile_status: PokemonVolatileStatus::ENCORE,
+                            },
+                        ));
+                    side.volatile_statuses
+                        .remove(&PokemonVolatileStatus::ENCORE);
+                    if side.volatile_status_durations.encore != 0 {
+                        incoming_instructions.instruction_list.push(
+                            Instruction::ChangeVolatileStatusDuration(
+                                ChangeVolatileStatusDurationInstruction {
+                                    side_ref: *side_ref,
+                                    volatile_status: PokemonVolatileStatus::ENCORE,
+                                    amount: -side.volatile_status_durations.encore,
+                                },
+                            ),
+                        );
+                        side.volatile_status_durations.encore = 0;
+                    }
+                }
+            }
         }
 
         if side
