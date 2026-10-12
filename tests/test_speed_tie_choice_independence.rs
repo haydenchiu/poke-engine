@@ -58,7 +58,12 @@ fn damage_to(si: &StateInstructions, side: SideReference) -> Vec<i16> {
 }
 
 fn side_one_moved_first(si: &StateInstructions) -> bool {
-    matches!(si.instruction_list.first(), Some(Instruction::Damage(d)) if d.side_ref == SideReference::SideTwo)
+    // the first instruction other than PP bookkeeping (with `exact_pp` every move emits a DecrementPP)
+    let first = si
+        .instruction_list
+        .iter()
+        .find(|i| !matches!(i, Instruction::DecrementPP(_)));
+    matches!(first, Some(Instruction::Damage(d)) if d.side_ref == SideReference::SideTwo)
 }
 
 #[test]

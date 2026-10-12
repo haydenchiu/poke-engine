@@ -2135,7 +2135,9 @@ fn deduct_pp(
 
     // most of the time pp decrement doesn't matter and just adds another instruction
     // so we only decrement pp if the move is at 10 or less pp since that is when it starts
-    // to matter
+    // to matter. Search reads PP only to drop a move at 0 PP from the options, which a move at
+    // 10+ PP reaches only after 10 more uses. `exact_pp` (for simulating whole battles) tracks every use.
+    #[cfg(not(feature = "exact_pp"))]
     if pp >= 10 {
         return None;
     }

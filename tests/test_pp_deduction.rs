@@ -12,7 +12,7 @@ use poke_engine::engine::abilities::Abilities;
 use poke_engine::engine::generate_instructions::generate_instructions_from_move_pair;
 use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus};
 use poke_engine::instruction::{Instruction, StateInstructions};
-use poke_engine::state::{PokemonMoveIndex, PokemonStatus, PokemonType, State};
+use poke_engine::state::{PokemonMoveIndex, PokemonStatus, PokemonType, SideReference, State};
 
 struct Turn {
     branches: Vec<StateInstructions>,
@@ -70,11 +70,14 @@ fn spent(turn: &Turn, start: i8) -> i8 {
     start - first
 }
 
+/// DecrementPP instructions for side one (side two's Splash is tracked too under `exact_pp`).
 fn decrement_pp_count(turn: &Turn) -> usize {
     turn.branches
         .iter()
         .flat_map(|b| b.instruction_list.iter())
-        .filter(|i| matches!(i, Instruction::DecrementPP(_)))
+        .filter(
+            |i| matches!(i, Instruction::DecrementPP(d) if d.side_ref == SideReference::SideOne),
+        )
         .count()
 }
 
@@ -456,5 +459,81 @@ fn test_locked_move_costs_pp_on_first_turn_only() {
             "locked, pressure={}",
             with_pressure
         );
+    }
+}
+
+// ------------------------------------------------------------------ E3: PP at 10 and above
+//
+// Showdown spends PP on every use (base_tbolt_pp16/11/10: 16 -> 15, 11 -> 10, 10 -> 9). By default the
+// engine only tracks PP below 10 (a search optimization); the `exact_pp` feature tracks every use.
+
+#[cfg(feature = "exact_pp")]
+#[test]
+fn test_exact_pp_high_pp_move_loses_pp() {
+    // the T3 reproducer (sim/tests/engine_discrepancies.rs e3) and the threshold around 10
+    for start in [16i8, 11, 10, 9] {
+        let t = use_move(Choices::THUNDERBOLT, start, |_| {});
+        assert_eq!(spent(&t, start), 1, "start {}", start);
+    }
+}
+
+#[cfg(feature = "exact_pp")]
+#[test]
+fn test_exact_pp_pressure_at_high_pp() {
+    let t = use_move(Choices::THUNDERBOLT, 16, pressure);
+    assert_eq!(spent(&t, 16), 2);
+}
+
+#[cfg(feature = "exact_pp")]
+#[test]
+fn test_exact_pp_full_paralysis_at_high_pp() {
+    let bs = branches(Choices::TACKLE, 35, |s| {
+        s.side_one.get_active().status = PokemonStatus::PARALYZE;
+    });
+    assert_used_spend(&bs, 35, 1);
+}
+
+/// A move used until it runs out reaches exactly 0 and is then no longer offered.
+#[cfg(feature = "exact_pp")]
+#[test]
+fn test_exact_pp_move_runs_out() {
+    let mut state = State::default();
+    let u = state.side_one.get_active();
+    u.replace_move(PokemonMoveIndex::M0, Choices::THUNDERBOLT);
+    u.moves.m0.pp = 16;
+    u.speed = 200;
+    for m in [
+        PokemonMoveIndex::M1,
+        PokemonMoveIndex::M2,
+        PokemonMoveIndex::M3,
+    ] {
+        u.replace_move(m, Choices::SPLASH);
+    }
+    let t = state.side_two.get_active();
+    t.replace_move(PokemonMoveIndex::M0, Choices::SPLASH);
+    t.hp = 30000;
+    t.maxhp = 30000;
+    for used in 1..=16 {
+        let generated = generate_instructions_from_move_pair(
+            &mut state,
+            &MoveChoice::Move(PokemonMoveIndex::M0),
+            &MoveChoice::Move(PokemonMoveIndex::M0),
+            false,
+        );
+        // follow the first branch; every branch spends the same PP
+        state.apply_instructions(&generated[0].instruction_list);
+        assert_eq!(state.side_one.get_active_immutable().moves.m0.pp, 16 - used);
+    }
+    let (options, _) = state.root_get_all_options();
+    assert!(!options.contains(&MoveChoice::Move(PokemonMoveIndex::M0)));
+}
+
+/// Without `exact_pp` the engine keeps upstream's shortcut: PP at 10 and above is not tracked.
+#[cfg(not(feature = "exact_pp"))]
+#[test]
+fn test_default_build_keeps_the_below_ten_shortcut() {
+    for (start, expected_spent) in [(16i8, 0i8), (11, 0), (10, 0), (9, 1)] {
+        let t = use_move(Choices::THUNDERBOLT, start, |_| {});
+        assert_eq!(spent(&t, start), expected_spent, "start {}", start);
     }
 }

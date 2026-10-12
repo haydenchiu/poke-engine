@@ -41,6 +41,9 @@ gen9 = []
 champions = []
 bss = ["champions"]
 terastallization = ["gen9"]
+# Track PP for every use of a move. Without it the engine only decrements PP below 10, a search
+# optimization (fewer instructions per move); with it a move at 10+ PP can run out, as in a battle.
+exact_pp = []
 
 default = []
 
