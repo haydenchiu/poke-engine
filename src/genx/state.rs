@@ -543,6 +543,12 @@ impl Pokemon {
     }
 
     pub fn add_move_from_choice(&self, vec: &mut Vec<MoveChoice>, choice: Choices) {
+        // Struggle is not in a slot: a Struggle saved to run after the opponent's pivot move (U-turn) is
+        // offered again as Struggle (looking it up in the slots would find nothing and lose the move)
+        if choice == Choices::STRUGGLE {
+            vec.push(MoveChoice::Struggle);
+            return;
+        }
         let mut iter = self.moves.into_iter();
         while let Some(p) = iter.next() {
             if p.id == choice {

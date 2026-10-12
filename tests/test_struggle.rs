@@ -647,3 +647,38 @@ fn test_struggle_double_knockout_hp() {
     let (_, _, a) = struggle_once(&mut s);
     assert_eq!((a.user_hp, a.foe_hp), (0, 0));
 }
+
+/// A faster foe's U-turn: the struggler's move is saved to run after the foe's replacement switches in
+/// (Showdown: Struggle hits the incoming Pokemon). The saved Struggle must come back as the struggler's
+/// option - it is not in a slot, so a slot lookup would find nothing - and then resolve as Struggle.
+#[test]
+fn test_struggle_saved_across_opponents_pivot() {
+    let mut s = state(archaludon(), umbreon(), Choices::UTURN);
+    s.side_two.get_active().speed = 300;
+    let (s1, s2) = (struggle(&s), splash(&s));
+    let branches = turn(&mut s, &s1, &s2);
+    let b = branches
+        .iter()
+        .find(|b| {
+            b.instruction_list
+                .iter()
+                .any(|i| matches!(i, Instruction::ToggleSideTwoForceSwitch))
+        })
+        .expect("U-turn makes side two switch");
+    s.apply_instructions(&b.instruction_list);
+    let (o1, _) = s.root_get_all_options();
+    let o1: Vec<String> = o1.iter().map(|c| c.to_string(&s.side_one)).collect();
+    assert_eq!(
+        o1,
+        vec!["struggle".to_string()],
+        "the saved Struggle is side one's option after the pivot"
+    );
+    // side two sends in its replacement; side one's Struggle then runs (damage and recoil)
+    let (_, o2) = s.root_get_all_options();
+    let user_hp = s.side_one.get_active_immutable().hp;
+    let after = turn(&mut s, &MoveChoice::Struggle, &o2[0]);
+    for b in &after {
+        let a = apply(&mut s, b);
+        assert_eq!(user_hp - a.user_hp, 41, "Struggle's recoil after the pivot");
+    }
+}
