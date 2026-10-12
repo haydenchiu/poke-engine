@@ -9033,10 +9033,12 @@ fn test_pressure_caused_double_pp_decrement() {
                 side_ref: SideReference::SideOne,
                 damage_amount: 48,
             }),
+            // Pressure would cost 2, but only 1 PP is left: Showdown's deductPP spends what is left and
+            // stops at 0 (this test previously expected 2, taking the move to -1 PP)
             Instruction::DecrementPP(DecrementPPInstruction {
                 side_ref: SideReference::SideOne,
                 move_index: PokemonMoveIndex::M0,
-                amount: 2,
+                amount: 1,
             }),
             Instruction::Damage(DamageInstruction {
                 side_ref: SideReference::SideTwo,

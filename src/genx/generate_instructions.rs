@@ -2036,6 +2036,61 @@ fn generate_instructions_from_existing_status_conditions(
     }
 }
 
+/// Whether an opposing Pressure adds 1 PP to this move's cost. Showdown charges the extra PP for each
+/// Pokemon in the move's `pressureTargets` (sim/pokemon.ts getMoveTargets): in singles that is the foe
+/// for every move that targets it or the whole field, nobody for moves aimed at the user or its side,
+/// and nobody for `foeSide` moves unless they carry the `mustpressure` flag. The engine's
+/// `MoveTarget::Opponent` matches that for every move in the Champions dex except Sticky Web (foeSide,
+/// no Pressure) and Imprison (self-targeting but `mustpressure`). The target is read from the base move
+/// data rather than the in-turn choice, which defender abilities such as Magic Bounce rewrite.
+fn move_is_affected_by_pressure(move_id: &Choices) -> bool {
+    match move_id {
+        Choices::IMPRISON => true,
+        Choices::STICKYWEB => false,
+        _ => MOVES
+            .get(move_id)
+            .map_or(false, |m| m.target == MoveTarget::Opponent),
+    }
+}
+
+/// Spend the PP for one use of the move, following Showdown: `deductPP` takes 1 PP when the move is run
+/// and `useMove` takes 1 more per opposing Pressure target, and `deductPP` never takes PP below 0 (it
+/// spends what is left, and nothing at 0). A fainted foe is not a target, so its Pressure does not apply.
+fn deduct_pp(
+    state: &mut State,
+    choice: &Choice,
+    attacking_side: &SideReference,
+    incoming_instructions: &mut StateInstructions,
+) {
+    let (attacker_side, defender_side) = state.get_both_sides(attacking_side);
+    let defender = defender_side.get_active_immutable();
+    let pressure = defender.hp > 0
+        && defender.ability == Abilities::PRESSURE
+        && move_is_affected_by_pressure(&choice.move_id);
+    let active = attacker_side.get_active();
+    let pp = active.moves[&choice.move_index].pp;
+
+    // most of the time pp decrement doesn't matter and just adds another instruction
+    // so we only decrement pp if the move is at 10 or less pp since that is when it starts
+    // to matter
+    if pp >= 10 {
+        return;
+    }
+
+    let amount = cmp::min(if pressure { 2 } else { 1 }, pp);
+    if amount <= 0 {
+        return;
+    }
+    incoming_instructions
+        .instruction_list
+        .push(Instruction::DecrementPP(DecrementPPInstruction {
+            side_ref: *attacking_side,
+            move_index: choice.move_index,
+            amount,
+        }));
+    active.moves[&choice.move_index].pp -= amount;
+}
+
 pub fn generate_instructions_from_move(
     state: &mut State,
     choice: &mut Choice,
@@ -2279,28 +2334,7 @@ pub fn generate_instructions_from_move(
         return;
     }
 
-    // most of the time pp decrement doesn't matter and just adds another instruction
-    // so we only decrement pp if the move is at 10 or less pp since that is when it starts
-    // to matter
-    let (attacker_side, defender_side) = state.get_both_sides(&attacking_side);
-    let active = attacker_side.get_active();
-    if active.moves[&choice.move_index].pp < 10 {
-        let pp_decrement_amount = if choice.target == MoveTarget::Opponent
-            && defender_side.get_active_immutable().ability == Abilities::PRESSURE
-        {
-            2
-        } else {
-            1
-        };
-        incoming_instructions
-            .instruction_list
-            .push(Instruction::DecrementPP(DecrementPPInstruction {
-                side_ref: attacking_side,
-                move_index: choice.move_index,
-                amount: pp_decrement_amount,
-            }));
-        active.moves[&choice.move_index].pp -= pp_decrement_amount;
-    }
+    deduct_pp(state, &choice, &attacking_side, &mut incoming_instructions);
 
     if !choice.sleep_talk_move {
         generate_instructions_from_existing_status_conditions(
