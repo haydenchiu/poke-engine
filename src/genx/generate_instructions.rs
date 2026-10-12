@@ -1793,12 +1793,48 @@ fn before_move(
     }
 }
 
+/// Drop this move's DecrementPP (at `pp_instruction`, an index into the instructions shared with
+/// `incoming_instructions`) from a branch in which the move ends up not being used. Showdown runs
+/// BeforeMove (paralysis, sleep, freeze, confusion, ...) before `deductPP`, so a Pokemon that cannot
+/// move spends no PP.
+fn remove_pp_deduction(branch: &mut StateInstructions, pp_instruction: Option<usize>) {
+    if let Some(index) = pp_instruction {
+        assert!(
+            matches!(branch.instruction_list[index], Instruction::DecrementPP(_)),
+            "expected this move's DecrementPP at index {}",
+            index
+        );
+        branch.instruction_list.remove(index);
+    }
+}
+
+#[cfg(test)]
 fn generate_instructions_from_existing_status_conditions(
     state: &mut State,
     attacking_side_ref: &SideReference,
     attacker_choice: &Choice,
     incoming_instructions: &mut StateInstructions,
     final_instructions: &mut Vec<StateInstructions>,
+) {
+    generate_instructions_from_existing_status_conditions_spending_pp(
+        state,
+        attacking_side_ref,
+        attacker_choice,
+        incoming_instructions,
+        final_instructions,
+        None,
+    )
+}
+
+/// `pp_instruction`: the index of the move's DecrementPP in `incoming_instructions`, if one was pushed.
+/// It is removed from every branch in which the move is not used.
+fn generate_instructions_from_existing_status_conditions_spending_pp(
+    state: &mut State,
+    attacking_side_ref: &SideReference,
+    attacker_choice: &Choice,
+    incoming_instructions: &mut StateInstructions,
+    final_instructions: &mut Vec<StateInstructions>,
+    pp_instruction: Option<usize>,
 ) {
     let (attacking_side, _defending_side) = state.get_both_sides(attacking_side_ref);
     let current_active_index = attacking_side.active_index;
@@ -1807,6 +1843,7 @@ fn generate_instructions_from_existing_status_conditions(
         PokemonStatus::PARALYZE => {
             // Fully-Paralyzed Branch
             let mut fully_paralyzed_instruction = incoming_instructions.clone();
+            remove_pp_deduction(&mut fully_paralyzed_instruction, pp_instruction);
             fully_paralyzed_instruction.update_percentage(FULLY_PARALYZED_CHANCE);
             final_instructions.push(fully_paralyzed_instruction);
 
@@ -1815,6 +1852,7 @@ fn generate_instructions_from_existing_status_conditions(
         }
         PokemonStatus::FREEZE => {
             let mut still_frozen_instruction = incoming_instructions.clone();
+            remove_pp_deduction(&mut still_frozen_instruction, pp_instruction);
             still_frozen_instruction.update_percentage(1.0 - THAW_CHANCE);
             final_instructions.push(still_frozen_instruction);
 
@@ -1867,6 +1905,7 @@ fn generate_instructions_from_existing_status_conditions(
                             );
                         } else {
                             let mut still_asleep_instruction = incoming_instructions.clone();
+                            remove_pp_deduction(&mut still_asleep_instruction, pp_instruction);
                             still_asleep_instruction.update_percentage(1.0);
                             still_asleep_instruction.instruction_list.push(
                                 Instruction::SetSleepTurns(SetSleepTurnsInstruction {
@@ -1917,6 +1956,7 @@ fn generate_instructions_from_existing_status_conditions(
                             attacker_active.sleep_turns += 1;
                         } else {
                             do_nothing_percentage = 1.0 - chance_to_wake;
+                            remove_pp_deduction(&mut do_nothing_instructions, pp_instruction);
                             do_nothing_instructions.instruction_list.push(
                                 Instruction::SetSleepTurns(SetSleepTurnsInstruction {
                                     side_ref: *attacking_side_ref,
@@ -1991,6 +2031,7 @@ fn generate_instructions_from_existing_status_conditions(
         .contains(&PokemonVolatileStatus::CONFUSION)
     {
         let mut hit_yourself_instruction = incoming_instructions.clone();
+        remove_pp_deduction(&mut hit_yourself_instruction, pp_instruction);
         hit_yourself_instruction.update_percentage(HIT_SELF_IN_CONFUSION_CHANCE);
 
         let attacking_stat = attacking_side.calculate_boosted_stat(PokemonBoostableStat::Attack);
@@ -2056,39 +2097,62 @@ fn move_is_affected_by_pressure(move_id: &Choices) -> bool {
 /// Spend the PP for one use of the move, following Showdown: `deductPP` takes 1 PP when the move is run
 /// and `useMove` takes 1 more per opposing Pressure target, and `deductPP` never takes PP below 0 (it
 /// spends what is left, and nothing at 0). A fainted foe is not a target, so its Pressure does not apply.
+///
+/// A move called by Sleep Talk is not charged to its own slot (Showdown runs it as an external move);
+/// Sleep Talk itself, already charged its 1 PP, pays the called move's Pressure extra.
+///
+/// Returns the index of the pushed DecrementPP in `incoming_instructions`, so that branches in which the
+/// move is not used after all (full paralysis, sleep, freeze, confusion) can drop it.
 fn deduct_pp(
     state: &mut State,
     choice: &Choice,
     attacking_side: &SideReference,
     incoming_instructions: &mut StateInstructions,
-) {
+) -> Option<usize> {
     let (attacker_side, defender_side) = state.get_both_sides(attacking_side);
     let defender = defender_side.get_active_immutable();
     let pressure = defender.hp > 0
         && defender.ability == Abilities::PRESSURE
         && move_is_affected_by_pressure(&choice.move_id);
     let active = attacker_side.get_active();
-    let pp = active.moves[&choice.move_index].pp;
+    let (move_index, cost) = if choice.sleep_talk_move {
+        let mut sleep_talk_index = None;
+        let mut iter = active.moves.into_iter();
+        while let Some(m) = iter.next() {
+            if m.id == Choices::SLEEPTALK {
+                sleep_talk_index = Some(iter.pokemon_move_index);
+                break;
+            }
+        }
+        match sleep_talk_index {
+            Some(index) if pressure => (index, 1),
+            _ => return None,
+        }
+    } else {
+        (choice.move_index, if pressure { 2 } else { 1 })
+    };
+    let pp = active.moves[&move_index].pp;
 
     // most of the time pp decrement doesn't matter and just adds another instruction
     // so we only decrement pp if the move is at 10 or less pp since that is when it starts
     // to matter
     if pp >= 10 {
-        return;
+        return None;
     }
 
-    let amount = cmp::min(if pressure { 2 } else { 1 }, pp);
+    let amount = cmp::min(cost, pp);
     if amount <= 0 {
-        return;
+        return None;
     }
     incoming_instructions
         .instruction_list
         .push(Instruction::DecrementPP(DecrementPPInstruction {
             side_ref: *attacking_side,
-            move_index: choice.move_index,
+            move_index,
             amount,
         }));
-    active.moves[&choice.move_index].pp -= amount;
+    active.moves[&move_index].pp -= amount;
+    Some(incoming_instructions.instruction_list.len() - 1)
 }
 
 pub fn generate_instructions_from_move(
@@ -2292,11 +2356,20 @@ pub fn generate_instructions_from_move(
         return;
     }
 
+    // A turn that continues a move already started - the second turn of a charge move, or a later turn
+    // of an Outrage-style lock - costs no PP: Showdown's runMove skips deductPP for a locked move, and
+    // charges Pressure's extra PP only on the first turn.
+    let mut continuing_locked_move = state
+        .get_side_immutable(&attacking_side)
+        .volatile_statuses
+        .contains(&PokemonVolatileStatus::LOCKEDMOVE);
+
     // If the move is a charge move, remove the volatile status if damage was done
     if choice.flags.charge {
         let side = state.get_side(&attacking_side);
         let volatile_status = charge_choice_to_volatile(&choice.move_id);
         if side.volatile_statuses.contains(&volatile_status) {
+            continuing_locked_move = true;
             choice.flags.charge = false;
             let instruction = Instruction::RemoveVolatileStatus(RemoveVolatileStatusInstruction {
                 side_ref: attacking_side,
@@ -2334,15 +2407,20 @@ pub fn generate_instructions_from_move(
         return;
     }
 
-    deduct_pp(state, &choice, &attacking_side, &mut incoming_instructions);
+    let pp_instruction = if continuing_locked_move {
+        None
+    } else {
+        deduct_pp(state, &choice, &attacking_side, &mut incoming_instructions)
+    };
 
     if !choice.sleep_talk_move {
-        generate_instructions_from_existing_status_conditions(
+        generate_instructions_from_existing_status_conditions_spending_pp(
             state,
             &attacking_side,
             &choice,
             &mut incoming_instructions,
             &mut final_instructions,
+            pp_instruction,
         );
     }
     let attacker = state
@@ -2369,6 +2447,8 @@ pub fn generate_instructions_from_move(
         return;
     } else if attacker.status == PokemonStatus::SLEEP && !choice.sleep_talk_move {
         state.reverse_instructions(&incoming_instructions.instruction_list);
+        // still asleep: the move is not used (reversed first, so the state's PP is restored too)
+        remove_pp_deduction(&mut incoming_instructions, pp_instruction);
         if incoming_instructions.percentage > 0.0 {
             final_instructions.push(incoming_instructions);
         }
