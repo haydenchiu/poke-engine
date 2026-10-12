@@ -57,6 +57,10 @@ pub enum MoveChoice {
     Switch(PokemonIndex),
     TeamPreview(PokemonIndex, PokemonIndex, PokemonIndex), // lead, second, third
     None,
+    /// Struggle: the move a Pokemon uses when it has no usable move (every move at 0 PP or disabled).
+    /// It is not a move slot - it carries no index - and spends no PP. Offered only with the `struggle`
+    /// feature (see `add_struggle_if_no_usable_move`); resolvable in every build.
+    Struggle,
 }
 
 impl MoveChoice {
@@ -78,12 +82,17 @@ impl MoveChoice {
             )
             .to_lowercase(),
             MoveChoice::None => "No Move".to_string(),
+            MoveChoice::Struggle => "struggle".to_string(),
         }
     }
     pub fn from_string(s: &str, side: &Side) -> Option<MoveChoice> {
         let s = s.to_lowercase();
         if s == "none" {
             return Some(MoveChoice::None);
+        }
+        // before any slot lookup: Struggle is never a move slot
+        if s == "struggle" {
+            return Some(MoveChoice::Struggle);
         }
 
         let mut pkmn_iter = side.pokemon.into_iter();
@@ -1159,6 +1168,24 @@ impl Side {
     }
 }
 
+/// Struggle (feature `struggle`): Showdown's only move option when a Pokemon has no usable move - every
+/// move at 0 PP, or every remaining move disabled (e.g. Taunt with only status moves). `options` holds
+/// exactly what `add_available_moves` produced for a side that is choosing a move normally (not
+/// recharging, not continuing a charge move, not in a forced-switch turn); switches are added after.
+/// Struggle never comes with mega evolution or terastallization. Without the feature the side gets no
+/// move option here, and `None` if it cannot switch either (the engine's previous behaviour).
+fn add_struggle_if_no_usable_move(_options: &mut Vec<MoveChoice>) {
+    #[cfg(feature = "struggle")]
+    if !_options.iter().any(|c| {
+        matches!(
+            c,
+            MoveChoice::Move(_) | MoveChoice::MoveMega(_) | MoveChoice::MoveTera(_)
+        )
+    }) {
+        _options.push(MoveChoice::Struggle);
+    }
+}
+
 impl State {
     pub fn root_get_all_options(&self) -> (Vec<MoveChoice>, Vec<MoveChoice>) {
         #[cfg(feature = "bss")]
@@ -1196,6 +1223,7 @@ impl State {
                 MoveChoice::Switch(_) => false,
                 MoveChoice::TeamPreview(_, _, _) => false,
                 MoveChoice::None => true,
+                MoveChoice::Struggle => true,
             });
         }
         if self.side_one.slow_uturn_move {
@@ -1216,6 +1244,7 @@ impl State {
                 self.side_one.can_use_tera(),
                 self.side_one.can_use_mega(),
             );
+            add_struggle_if_no_usable_move(&mut s1_options);
         }
 
         if self.side_two.force_trapped {
@@ -1224,6 +1253,7 @@ impl State {
                 MoveChoice::Switch(_) => false,
                 MoveChoice::TeamPreview(_, _, _) => false,
                 MoveChoice::None => true,
+                MoveChoice::Struggle => true,
             });
         }
         if self.side_two.slow_uturn_move {
@@ -1244,6 +1274,7 @@ impl State {
                 self.side_two.can_use_tera(),
                 self.side_two.can_use_mega(),
             );
+            add_struggle_if_no_usable_move(&mut s2_options);
         }
 
         if s1_options.len() == 0 {
@@ -1333,6 +1364,7 @@ impl State {
                 self.side_one.can_use_tera(),
                 self.side_one.can_use_mega(),
             );
+            add_struggle_if_no_usable_move(&mut side_one_options);
             if !self.side_one.trapped(side_two_active) {
                 self.side_one.add_switches(&mut side_one_options);
             }
@@ -1363,6 +1395,7 @@ impl State {
                 self.side_two.can_use_tera(),
                 self.side_two.can_use_mega(),
             );
+            add_struggle_if_no_usable_move(&mut side_two_options);
             if !self.side_two.trapped(side_one_active) {
                 self.side_two.add_switches(&mut side_two_options);
             }

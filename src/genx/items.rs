@@ -790,7 +790,10 @@ pub fn item_before_move(
         Items::SALACBERRY if active_pkmn.hp <= active_pkmn.maxhp / 4 => {
             boost_berry(side_ref, state, PokemonBoostableStat::Speed, instructions)
         }
-        Items::CHOICESPECS | Items::CHOICEBAND | Items::CHOICESCARF => {
+        // Struggle does not lock a choice item (Showdown's choicelock refuses to start on Struggle)
+        Items::CHOICESPECS | Items::CHOICEBAND | Items::CHOICESCARF
+            if choice.move_id != Choices::STRUGGLE =>
+        {
             let ins = get_choice_move_disable_instructions(active_pkmn, side_ref, &choice.move_id);
             for i in ins {
                 state.apply_one_instruction(&i);

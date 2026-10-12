@@ -44,6 +44,9 @@ terastallization = ["gen9"]
 # Track PP for every use of a move. Without it the engine only decrements PP below 10, a search
 # optimization (fewer instructions per move); with it a move at 10+ PP can run out, as in a battle.
 exact_pp = []
+# Offer Struggle when a Pokemon has no usable move. Without it such a Pokemon is offered no move (None
+# if it cannot switch), the engine's previous behaviour; MoveChoice::Struggle is resolvable either way.
+struggle = []
 
 default = []
 

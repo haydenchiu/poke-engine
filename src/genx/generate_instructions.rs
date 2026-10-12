@@ -236,6 +236,35 @@ fn set_last_used_move_as_move(
     side.last_used_move = LastUsedMove::Move(used_move);
 }
 
+/// Struggle is not a move slot, so it cannot be recorded as `LastUsedMove::Move`. Showdown records it as the
+/// last move, which makes Encore fail (`failencore`), lifts any repeat restriction (Gigaton Hammer, Blood
+/// Moon) and ends the first-turn window (Fake Out); `LastUsedMove::None` has exactly those effects here.
+/// A flinched Pokemon does not move, so it is handled as in `set_last_used_move_as_move`.
+fn set_last_used_move_as_struggle(
+    side: &mut Side,
+    side_ref: SideReference,
+    incoming_instructions: &mut StateInstructions,
+) {
+    if side
+        .volatile_statuses
+        .contains(&PokemonVolatileStatus::FLINCH)
+        && !matches!(side.last_used_move, LastUsedMove::Switch(_))
+    {
+        return;
+    }
+    if matches!(side.last_used_move, LastUsedMove::None) {
+        return;
+    }
+    incoming_instructions
+        .instruction_list
+        .push(Instruction::SetLastUsedMove(SetLastUsedMoveInstruction {
+            side_ref,
+            last_used_move: LastUsedMove::None,
+            previous_last_used_move: side.last_used_move,
+        }));
+    side.last_used_move = LastUsedMove::None;
+}
+
 fn generate_instructions_from_switch(
     state: &mut State,
     new_pokemon_index: PokemonIndex,
@@ -2109,6 +2138,10 @@ fn deduct_pp(
     attacking_side: &SideReference,
     incoming_instructions: &mut StateInstructions,
 ) -> Option<usize> {
+    // Struggle has no move slot and costs no PP (Pressure included)
+    if choice.move_id == Choices::STRUGGLE {
+        return None;
+    }
     let (attacker_side, defender_side) = state.get_both_sides(attacking_side);
     let defender = defender_side.get_active_immutable();
     let pressure = defender.hp > 0
@@ -2224,9 +2257,11 @@ pub fn generate_instructions_from_move(
     state.apply_instructions(&incoming_instructions.instruction_list);
 
     let side = state.get_side(&attacking_side);
-    if side
-        .volatile_statuses
-        .contains(&PokemonVolatileStatus::ENCORE)
+    // Struggle is not replaced by the encored move: it is only chosen when that move cannot be used
+    if choice.move_id != Choices::STRUGGLE
+        && side
+            .volatile_statuses
+            .contains(&PokemonVolatileStatus::ENCORE)
     {
         match side.last_used_move {
             LastUsedMove::Move(last_used_move) => {
@@ -2395,12 +2430,20 @@ pub fn generate_instructions_from_move(
     }
 
     if state.use_last_used_move {
-        set_last_used_move_as_move(
-            state.get_side(&attacking_side),
-            choice.move_index,
-            attacking_side,
-            &mut incoming_instructions,
-        );
+        if choice.move_id == Choices::STRUGGLE {
+            set_last_used_move_as_struggle(
+                state.get_side(&attacking_side),
+                attacking_side,
+                &mut incoming_instructions,
+            );
+        } else {
+            set_last_used_move_as_move(
+                state.get_side(&attacking_side),
+                choice.move_index,
+                attacking_side,
+                &mut incoming_instructions,
+            );
+        }
     }
 
     if cannot_use_move(state, &choice, &attacking_side) {
@@ -3720,6 +3763,40 @@ fn add_end_of_turn_instructions(
     } // end volatile statuses
 }
 
+/// The defender's HP plus its Substitute's HP: Struggle recoils only if this went down over the move.
+fn struggle_defender_hp(state: &State, attacking_side: &SideReference) -> i16 {
+    let defender_side = state.get_side_immutable(&attacking_side.get_other_side());
+    defender_side.get_active_immutable().hp + defender_side.substitute_health
+}
+
+/// Struggle's recoil (Showdown `struggleRecoil`): `round(maxhp / 4)`, at least 1, once after all hits, and
+/// only if the move damaged the target or its Substitute (so not when blocked by Protect). It is direct
+/// damage: Magic Guard and Rock Head do not prevent it. It can knock the user out.
+fn struggle_recoil(
+    state: &mut State,
+    attacking_side: &SideReference,
+    defender_hp_before: i16,
+    instructions: &mut StateInstructions,
+) {
+    if struggle_defender_hp(state, attacking_side) >= defender_hp_before {
+        return;
+    }
+    let attacker = state.get_side(attacking_side).get_active();
+    // JavaScript Math.round of maxhp / 4 (halves round up), in integers
+    let recoil = cmp::max(1, (attacker.maxhp + 2) / 4);
+    let damage_amount = cmp::min(recoil, attacker.hp);
+    if damage_amount <= 0 {
+        return;
+    }
+    attacker.hp -= damage_amount;
+    instructions
+        .instruction_list
+        .push(Instruction::Damage(DamageInstruction {
+            side_ref: *attacking_side,
+            damage_amount,
+        }));
+}
+
 fn run_move(
     state: &mut State,
     attacking_side: SideReference,
@@ -3732,6 +3809,7 @@ fn run_move(
     final_instructions: &mut Vec<StateInstructions>,
 ) {
     let mut hit_sub = false;
+    let defender_hp_before = struggle_defender_hp(state, &attacking_side);
     for _ in 0..hit_count {
         if does_damage {
             hit_sub = generate_instructions_from_damage(
@@ -3777,6 +3855,15 @@ fn run_move(
       // each multi-hit move should trigger a chance for a secondary effect,
       // but the way this engine was structured makes it difficult to implement
       // without some performance hits.
+
+    if choice.move_id == Choices::STRUGGLE {
+        struggle_recoil(
+            state,
+            &attacking_side,
+            defender_hp_before,
+            &mut instructions,
+        );
+    }
 
     if let Some(boost) = &choice.boost {
         get_instructions_from_boosts(state, boost, &attacking_side, &mut instructions);
@@ -4234,6 +4321,11 @@ pub fn generate_instructions_from_move_pair(
         MoveChoice::None => {
             side_one_choice = Choice::default();
         }
+        MoveChoice::Struggle => {
+            // not a move slot: `move_index` is left at its default and every slot-indexed use is
+            // skipped for Struggle (PP, Encore, last-used move, choice lock)
+            side_one_choice = MOVES.get(&Choices::STRUGGLE).unwrap().clone();
+        }
     }
 
     let mut side_two_choice;
@@ -4268,6 +4360,11 @@ pub fn generate_instructions_from_move_pair(
         }
         MoveChoice::None => {
             side_two_choice = Choice::default();
+        }
+        MoveChoice::Struggle => {
+            // not a move slot: `move_index` is left at its default and every slot-indexed use is
+            // skipped for Struggle (PP, Encore, last-used move, choice lock)
+            side_two_choice = MOVES.get(&Choices::STRUGGLE).unwrap().clone();
         }
     }
 

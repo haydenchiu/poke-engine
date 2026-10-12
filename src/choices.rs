@@ -16376,7 +16376,8 @@ pub static MOVES: LazyLock<HashMap<Choices, Choice>> = LazyLock::new(|| {
             move_id: Choices::STRUGGLE,
             base_power: 50.0,
             category: MoveCategory::Physical,
-            move_type: PokemonType::NORMAL,
+            // typeless (Showdown sets '???'): neutral against every type, no STAB
+            move_type: PokemonType::TYPELESS,
             flags: Flags {
                 contact: true,
                 protect: true,

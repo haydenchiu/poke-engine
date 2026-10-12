@@ -619,7 +619,11 @@ pub fn ability_before_move(
                 .contains(&PokemonVolatileStatus::TYPECHANGE)
             {
                 let active_pkmn = attacking_side.get_active();
-                if !active_pkmn.has_type(&choice.move_type) && !active_pkmn.terastallized {
+                // a typeless move (Struggle) changes nothing (Showdown: `type !== '???'`)
+                if choice.move_type != PokemonType::TYPELESS
+                    && !active_pkmn.has_type(&choice.move_type)
+                    && !active_pkmn.terastallized
+                {
                     instructions
                         .instruction_list
                         .push(Instruction::ChangeType(ChangeType {
@@ -645,7 +649,10 @@ pub fn ability_before_move(
         }
         #[cfg(any(feature = "gen6", feature = "gen7", feature = "gen8"))]
         Abilities::PROTEAN | Abilities::LIBERO => {
-            if !active_pkmn.has_type(&choice.move_type) && !active_pkmn.terastallized {
+            if choice.move_type != PokemonType::TYPELESS
+                && !active_pkmn.has_type(&choice.move_type)
+                && !active_pkmn.terastallized
+            {
                 instructions
                     .instruction_list
                     .push(Instruction::ChangeType(ChangeType {
@@ -672,7 +679,8 @@ pub fn ability_before_move(
                 }
             }
         }
-        Abilities::GORILLATACTICS => {
+        // like a choice item, Gorilla Tactics does not lock into Struggle
+        Abilities::GORILLATACTICS if choice.move_id != Choices::STRUGGLE => {
             let ins = get_choice_move_disable_instructions(active_pkmn, side_ref, &choice.move_id);
             for i in ins {
                 state.apply_one_instruction(&i);
