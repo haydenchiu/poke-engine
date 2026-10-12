@@ -676,7 +676,8 @@ fn test_struggle_saved_across_opponents_pivot() {
     // side two sends in its replacement; side one's Struggle then runs (damage and recoil)
     let (_, o2) = s.root_get_all_options();
     let user_hp = s.side_one.get_active_immutable().hp;
-    let after = turn(&mut s, &MoveChoice::Struggle, &o2[0]);
+    let s1 = struggle(&s);
+    let after = turn(&mut s, &s1, &o2[0]);
     for b in &after {
         let a = apply(&mut s, b);
         assert_eq!(user_hp - a.user_hp, 41, "Struggle's recoil after the pivot");
