@@ -1463,24 +1463,33 @@ pub fn choice_special_effect(
                 .volatile_statuses
                 .contains(&PokemonVolatileStatus::SUBSTITUTE)
             {
-                let target_hp = (attacking_side.get_active_immutable().hp
-                    + defending_side.get_active_immutable().hp)
-                    / 2;
+                // Both Pokemon are set to the average HP (at least 1), each capped at its own max HP:
+                // Showdown's `Math.floor((targetHP + pokemon.hp) / 2) || 1` followed by `sethp`, which
+                // clamps to the Pokemon's maxhp. Without the cap the side with the lower max HP can be
+                // healed past it.
+                let average_hp = cmp::max(
+                    1,
+                    (attacking_side.get_active_immutable().hp
+                        + defending_side.get_active_immutable().hp)
+                        / 2,
+                );
+                let attacker_hp = cmp::min(average_hp, attacking_side.get_active_immutable().maxhp);
+                let defender_hp = cmp::min(average_hp, defending_side.get_active_immutable().maxhp);
                 instructions
                     .instruction_list
                     .push(Instruction::Damage(DamageInstruction {
                         side_ref: *attacking_side_ref,
-                        damage_amount: attacking_side.get_active_immutable().hp - target_hp,
+                        damage_amount: attacking_side.get_active_immutable().hp - attacker_hp,
                     }));
                 instructions
                     .instruction_list
                     .push(Instruction::Damage(DamageInstruction {
                         side_ref: attacking_side_ref.get_other_side(),
-                        damage_amount: defending_side.get_active_immutable().hp - target_hp,
+                        damage_amount: defending_side.get_active_immutable().hp - defender_hp,
                     }));
 
-                attacking_side.get_active().hp = target_hp;
-                defending_side.get_active().hp = target_hp;
+                attacking_side.get_active().hp = attacker_hp;
+                defending_side.get_active().hp = defender_hp;
             }
         }
         Choices::SUBSTITUTE | Choices::SHEDTAIL => {
